@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fidget Harp</title>
+<style>
+  :root{
+    --bg-top:#181630; --bg-bot:#3a1e5c; --gold:#f4b94a; --coral:#ff6b5b;
+    --cream:#fdf6ec; --hint:rgba(255,255,255,.35);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;background:var(--bg-top);overscroll-behavior:none;}
+  body{
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    overflow:hidden;
+  }
+  canvas{display:block;width:100vw;height:100vh;touch-action:none;}
+  .menu{
+    position:fixed;inset:0;background:rgba(10,8,20,.72);
+    display:flex;align-items:center;justify-content:center;z-index:10;
+  }
+  .menu-card{
+    background:#221c38;border:1px solid #3a2f58;border-radius:16px;
+    padding:18px;max-width:92vw;max-height:80vh;overflow-y:auto;
+  }
+  .menu-title{color:var(--cream);font:600 15px/1.4 system-ui,sans-serif;margin:0 0 12px;text-align:center;}
+  .menu-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}
+  .menu-btn{
+    font:600 14px system-ui,sans-serif;color:var(--cream);background:#352a54;
+    border:1px solid #4a3d70;border-radius:10px;padding:10px 6px;min-width:60px;
+  }
+  .menu-btn:active{background:var(--coral);}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, w2, cellW, cellH, stringTop, stringThick, stopLeft;
+const ROWS=3, COLS=5, STRINGS=40;
+
+const ROOTS=['C','C#','Db','D','D#','Eb','E','F','F#','Gb','G','G#','Ab','A','A#','Bb','B'];
+const PITCH_CLASS={C:0,'C#':1,Db:1,D:2,'D#':3,Eb:3,E:4,F:5,'F#':6,Gb:6,G:7,'G#':8,Ab:8,A:9,'A#':10,Bb:10,B:11};
+const MODIFIERS={maj:[0,4,7],min:[0,3,7],'6':[0,4,7,9],maj7:[0,4,7,11],'7':[0,4,7,10],
+  '7min':[0,3,7,10],'6min':[0,3,7,9],sus4:[0,5,7],'7sus4':[0,5,7,10],aug:[0,4,8],
+  dim:[0,3,6],add9:[0,4,7,2],'9':[0,4,7,10,2],'5':[0,7],sus2:[0,2,7]};
+const MOD_LIST=Object.keys(MODIFIERS);
+
+const NOTE_NAMES=['C','F','G','C','C#','D','D#','E','F','F#','G','G#','A','A#','B',
+  'C','C#','D','D#','E','F','F#','G','G#','A','A#','B','C','C#','D','D#','E','F','F#',
+  'G','G#','A','A#','B','C'];
+const BASE_FREQ=[65.41,87.31,98.0,130.81,138.58,146.83,155.56,164.81,174.61,185.0,196.0,
+  207.65,220.0,233.08,246.94,261.63,277.18,293.66,311.13,329.63,349.23,369.99,392.0,415.3,
+  440.0,466.16,493.88,523.25,554.37,587.33,622.25,659.25,698.46,739.99,783.99,830.61,
+  880.0,932.33,987.77,1046.5];
+const STRING_PC=NOTE_NAMES.map(n=>PITCH_CLASS[n]);
+
+let chords=[
+  {r:'Bb',m:'maj'},{r:'A',m:'min'},{r:'D',m:'min'},{r:'A',m:'7'},{r:'A',m:'maj'},
+  {r:'C',m:'7'},{r:'F',m:'7'},{r:'G',m:'7'},{r:'D',m:'7'},{r:'E',m:'7'},
+  {r:'C',m:'maj'},{r:'F',m:'maj'},{r:'G',m:'maj'},{r:'D',m:'maj'},{r:'E',m:'maj'}
+];
+let selected=10;
+let chordHues=chords.map(()=>Math.random()*360);
+let stringTints=Array.from({length:STRINGS},()=>`rgb(${50+Math.random()*200|0},${50+Math.random()*200|0},${50+Math.random()*200|0})`);
+let stringAlpha=new Array(STRINGS).fill(0.5);
+let damperCache=[];
+
+function activeStrings(chord){
+  if(!chord) return [];
+  const rootPc=PITCH_CLASS[chord.r];
+  const intervals=MODIFIERS[chord.m]||MODIFIERS.maj;
+  const out=[];
+  for(let i=0;i<STRINGS;i++){
+    const off=((STRING_PC[i]-rootPc)%12+12)%12;
+    if(intervals.includes(off)) out.push(i);
+  }
+  return out;
+}
+function rebuildDampers(){
+  damperCache=chords.map(c=>activeStrings(c).map(i=>[stringY(i),i]).sort((a,b)=>a[0]-b[0]));
+}
+function stringY(i){ const row=STRINGS-1-i; return row*stringThick+stringTop; }
+function nearestString(chordIdx,y){
+  const list=damperCache[chordIdx]; if(!list||!list.length) return -1;
+  let best=list[0],bd=Math.abs(list[0][0]-y);
+  for(const e of list){ const d=Math.abs(e[0]-y); if(d<bd){bd=d;best=e;} }
+  return best[1];
+}
+
+// ---- audio ----
+const AudioCtx=window.AudioContext||window.webkitAudioContext;
+const actx=new AudioCtx();
+const INSTRUMENTS=[
+  {name:'Pluck',wave:'triangle',attack:.004,decay:.35},
+  {name:'Warm Pad',wave:'sawtooth',attack:.035,decay:.9,filter:1100},
+  {name:'Bell',wave:'sine',attack:.002,decay:1.3,detune:2.005,detuneGain:.33}
+];
+let instrumentIndex=0;
+try{ const saved=localStorage.getItem('fh_instrument'); if(saved!==null) instrumentIndex=+saved; }catch(e){}
+
+const activeVoices=new Set();
+function pluck(freq,velocity,pan){
+  if(actx.state==='suspended') actx.resume();
+  const now=actx.currentTime;
+  const p=INSTRUMENTS[instrumentIndex];
+  const gain=actx.createGain();
+  gain.gain.setValueAtTime(0,now);
+  gain.gain.linearRampToValueAtTime(Math.min(velocity,1),now+p.attack);
+  gain.gain.exponentialRampToValueAtTime(0.0015,now+p.attack+p.decay);
+  let out=gain;
+  if(p.filter){
+    const f=actx.createBiquadFilter(); f.type='lowpass'; f.frequency.value=p.filter;
+    gain.connect(f); out=f;
+  }
+  const panner=actx.createStereoPanner(); panner.pan.value=Math.max(-1,Math.min(1,pan));
+  out.connect(panner).connect(actx.destination);
+  const osc=actx.createOscillator(); osc.type=p.wave; osc.frequency.value=freq;
+  osc.connect(gain); osc.start(now); osc.stop(now+p.attack+p.decay+.1);
+  const voice={gain,oscs:[osc]};
+  if(p.detune){
+    const g2=actx.createGain(); g2.gain.value=p.detuneGain;
+    const osc2=actx.createOscillator(); osc2.type=p.wave; osc2.frequency.value=freq*p.detune;
+    osc2.connect(g2).connect(gain); osc2.start(now); osc2.stop(now+p.attack+p.decay+.1);
+    voice.oscs.push(osc2);
+  }
+  activeVoices.add(voice);
+  osc.onended=()=>{ activeVoices.delete(voice); try{gain.disconnect();}catch(e){} };
+}
+function haltAll(){
+  const now=actx.currentTime;
+  for(const v of activeVoices){
+    try{
+      v.gain.gain.cancelScheduledValues(now);
+      v.gain.gain.setValueAtTime(v.gain.gain.value,now);
+      v.gain.gain.linearRampToValueAtTime(0,now+.03);
+      v.oscs.forEach(o=>{ try{o.stop(now+.04);}catch(e){} });
+    }catch(e){}
+  }
+  activeVoices.clear();
+}
+
+// ---- layout ----
+function resize(){
+  W=canvas.width=innerWidth*devicePixelRatio;
+  H=canvas.height=innerHeight*devicePixelRatio;
+  canvas.style.width=innerWidth+'px'; canvas.style.height=innerHeight+'px';
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  W=innerWidth; H=innerHeight;
+  w2=W/2; cellW=w2/COLS; cellH=H/ROWS;
+  stringTop=0.08*H; stringThick=(0.84*H)/STRINGS; stopLeft=0.92*W;
+  rebuildDampers();
+}
+addEventListener('resize',resize);
+
+// ---- drawing ----
+let showHints=true;
+function draw(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#181630'); g.addColorStop(1,'#3a1e5c');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  drawChords(); drawStrings(); drawStop();
+  if(showHints) drawHints();
+  requestAnimationFrame(draw);
+}
+function drawChords(){
+  const edge=H/160, radius=Math.min(cellW,cellH)*0.14;
+  for(let i=0;i<chords.length;i++){
+    const row=(i/COLS)|0, col=i%COLS;
+    const left=col*cellW+edge, top=row*cellH+edge, right=(col+1)*cellW-edge, bottom=row*cellH+cellH-edge;
+    const hue=chordHues[i], on=i===selected;
+    const topC=`hsl(${hue},${on?70:55}%,${on?62:42}%)`, botC=`hsl(${hue},${on?65:50}%,${on?32:20}%)`;
+    const grad=ctx.createLinearGradient(0,top,0,bottom);
+    grad.addColorStop(0,topC); grad.addColorStop(1,botC);
+    roundRect(left,top,right-left,bottom-top,radius);
+    ctx.fillStyle=grad; ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,.45)'; ctx.lineWidth=H/300; ctx.stroke();
+    const chord=chords[i], cx=(col+.5)*cellW, cy=row*cellH+cellH/2;
+    const l1=chord?chord.r:'', l2=(chord&&chord.m!=='maj')?chord.m:'';
+    ctx.textAlign='center'; ctx.fillStyle='#fff';
+    ctx.font=`700 ${H/14}px system-ui,sans-serif`;
+    ctx.fillText(l1,cx,cy-(l2?H/70:0));
+    if(l2){ ctx.font=`600 ${H/22}px system-ui,sans-serif`; ctx.fillText(l2,cx,cy+H/22); }
+  }
+}
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+function drawStrings(){
+  for(let i=0;i<STRINGS;i++){
+    const y=stringY(i);
+    ctx.globalAlpha=stringAlpha[i];
+    ctx.fillStyle=stringTints[i];
+    ctx.fillRect(w2,y,stopLeft-w2,stringThick*0.82);
+  }
+  ctx.globalAlpha=1;
+}
+function drawStop(){
+  ctx.save();
+  ctx.translate(stopLeft+(W-stopLeft)/2,H/2); ctx.rotate(-Math.PI/2);
+  ctx.fillStyle='rgba(255,107,91,.8)'; ctx.font=`600 ${H/32}px system-ui,sans-serif`;
+  ctx.textAlign='center'; ctx.fillText('stop',0,0);
+  ctx.restore();
+}
+function drawHints(){
+  ctx.fillStyle='rgba(255,255,255,.35)'; ctx.font=`${H/38}px system-ui,sans-serif`;
+  ctx.textAlign='center';
+  ctx.fillText('hold a chord + another finger to edit',w2/2,H*0.045);
+  ctx.fillText('hold strings to change instrument',(w2+stopLeft)/2,H*0.045);
+}
+
+// ---- touch / pointer handling ----
+const pointers=new Map();
+let longPressTimer=null;
+const LONG_PRESS_MS=500, SLOP=14;
+function inStop(x){ return x>=stopLeft; }
+function inStringZone(x){ return x>=w2 && !inStop(x); }
+function chordIndexAt(x,y){
+  const col=Math.min(COLS-1,Math.max(0,(x/cellW)|0));
+  const row=Math.min(ROWS-1,Math.max(0,(y/cellH)|0));
+  return row*COLS+col;
+}
+function posMultiplier(x){
+  const t=Math.max(0,Math.min(1,(x-w2)/(stopLeft-w2)));
+  return 1-t*0.7;
+}
+canvas.addEventListener('pointerdown',e=>{
+  showHints=false;
+  canvas.setPointerCapture(e.pointerId);
+  const p={x:e.clientX,y:e.clientY,downX:e.clientX,downY:e.clientY,
+    oldString:-1,oldY:0,oldClock:0,lastPlucked:-1,longPressFired:false};
+  pointers.set(e.pointerId,p);
+  if(inStringZone(p.x,p.y)){
+    longPressTimer=setTimeout(()=>{ p.longPressFired=true; openInstrumentMenu(); },LONG_PRESS_MS);
+  }
+  maybeEditChord();
+  handleTouch();
+});
+canvas.addEventListener('pointermove',e=>{
+  const p=pointers.get(e.pointerId); if(!p) return;
+  p.x=e.clientX; p.y=e.clientY;
+  const dx=p.x-p.downX, dy=p.y-p.downY;
+  if(dx*dx+dy*dy>SLOP*SLOP && longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; }
+  handleTouch();
+});
+function release(id){
+  const p=pointers.get(id); if(!p) return;
+  if(longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; }
+  if(p.lastPlucked>=0){
+    let held=false;
+    for(const [oid,op] of pointers) if(oid!==id && op.oldString===p.lastPlucked) held=true;
+    if(!held) stringAlpha[p.lastPlucked]=0.5;
+  }
+  pointers.delete(id);
+}
+canvas.addEventListener('pointerup',e=>release(e.pointerId));
+canvas.addEventListener('pointercancel',e=>release(e.pointerId));
+
+function maybeEditChord(){
+  const onChordSide=[...pointers.values()].filter(p=>p.x<w2);
+  if(onChordSide.length<2) return;
+  if(onChordSide.some(p=>chordIndexAt(p.x,p.y)===selected)) openChordEditor();
+}
+function handleTouch(){
+  for(const p of pointers.values()){
+    if(inStop(p.x,p.y)){
+      stopAllVisual();
+      return;
+    }
+  }
+  for(const p of pointers.values()){
+    if(p.x<w2){
+      const nc=chordIndexAt(p.x,p.y);
+      if(nc!==selected){ selected=nc; }
+    }
+  }
+  for(const [id,p] of pointers){
+    if(p.longPressFired || p.x<w2 || inStop(p.x,p.y)) continue;
+    const k=nearestString(selected,p.y);
+    let kk=k;
+    if(kk>=0 && kk===p.oldString) kk=-1; else if(kk>=0) p.oldString=kk;
+    const now=performance.now();
+    let v=0.8;
+    if(p.oldClock){
+      const dt=Math.max(now-p.oldClock,1);
+      v=Math.min(0.8,800*Math.abs(p.y-p.oldY)/(H*dt)+0.1);
+    }
+    p.oldClock=now; p.oldY=p.y;
+    if(kk>=0){
+      const mult=posMultiplier(p.x);
+      const freq=BASE_FREQ[kk];
+      const pan=(kk/STRINGS)*2-1;
+      pluck(freq, v*mult, pan*0.6);
+      stringAlpha[kk]=1;
+      if(p.lastPlucked>=0 && p.lastPlucked!==kk){
+        let held=false;
+        for(const [oid,op] of pointers) if(oid!==id && op.oldString===p.lastPlucked) held=true;
+        if(!held) stringAlpha[p.lastPlucked]=0.5;
+      }
+      p.lastPlucked=kk;
+    }
+  }
+}
+function stopAllVisual(){ stringAlpha.fill(0.5); haltAll(); }
+
+// ---- menus ----
+function showMenu(title,items,onPick){
+  const overlay=document.createElement('div'); overlay.className='menu';
+  const card=document.createElement('div'); card.className='menu-card';
+  const h=document.createElement('p'); h.className='menu-title'; h.textContent=title;
+  const grid=document.createElement('div'); grid.className='menu-grid';
+  items.forEach(label=>{
+    const b=document.createElement('button'); b.className='menu-btn'; b.textContent=label;
+    b.onclick=()=>{ document.body.removeChild(overlay); onPick(label); };
+    grid.appendChild(b);
+  });
+  card.appendChild(h); card.appendChild(grid); overlay.appendChild(card);
+  overlay.onclick=e=>{ if(e.target===overlay) document.body.removeChild(overlay); };
+  document.body.appendChild(overlay);
+}
+function openChordEditor(){
+  showMenu('Root note',[...ROOTS,'clear'],root=>{
+    if(root==='clear'){ chords[selected]=null; rebuildDampers(); return; }
+    showMenu('Chord type',MOD_LIST,mod=>{
+      chords[selected]={r:root,m:mod}; chordHues[selected]=Math.random()*360;
+      rebuildDampers();
+    });
+  });
+}
+function openInstrumentMenu(){
+  showMenu('Instrument',INSTRUMENTS.map(i=>i.name),name=>{
+    instrumentIndex=INSTRUMENTS.findIndex(i=>i.name===name);
+    try{ localStorage.setItem('fh_instrument',instrumentIndex); }catch(e){}
+  });
+}
+
+resize(); rebuildDampers(); draw();
+</script>
+</body>
+</html>
