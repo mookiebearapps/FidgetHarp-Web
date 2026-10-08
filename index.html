@@ -32,10 +32,20 @@
     border:1px solid #4a3d70;border-radius:10px;padding:10px 6px;min-width:60px;
   }
   .menu-btn:active{background:var(--coral);}
+  .fs-btn{
+    position:fixed;z-index:20;
+    top:calc(env(safe-area-inset-top,0px) + 8px); right:8px;
+    width:30px;height:30px;border-radius:8px;
+    background:rgba(20,16,34,.55);border:1px solid rgba(255,255,255,.18);
+    color:rgba(255,255,255,.75);font-size:15px;line-height:1;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .fs-btn:active{background:rgba(255,107,91,.5);}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<button id="fsBtn" class="fs-btn" aria-label="Toggle fullscreen">⛶</button>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -96,8 +106,12 @@ const AudioCtx=window.AudioContext||window.webkitAudioContext;
 const actx=new AudioCtx();
 const INSTRUMENTS=[
   {name:'Pluck',wave:'triangle',attack:.004,decay:.35},
-  {name:'Warm Pad',wave:'sawtooth',attack:.035,decay:.9,filter:1100},
-  {name:'Bell',wave:'sine',attack:.002,decay:1.3,detune:2.005,detuneGain:.33}
+  {name:'Warm Pad',wave:'sawtooth',attack:.035,decay:.9,filter:1100,level:.8},
+  {name:'Bell',wave:'sine',attack:.002,decay:1.3,detune:2.005,detuneGain:.33},
+  {name:'Synth Strings',wave:'sawtooth',attack:.15,decay:1.1,filter:1900,detune:1.004,detuneGain:.55,level:.75},
+  {name:'Sawtooth',wave:'sawtooth',attack:.005,decay:.5,level:.8},
+  {name:'Square',wave:'square',attack:.005,decay:.45,level:.65},
+  {name:'Sine',wave:'sine',attack:.004,decay:.4}
 ];
 let instrumentIndex=0;
 try{ const saved=localStorage.getItem('fh_instrument'); if(saved!==null) instrumentIndex=+saved; }catch(e){}
@@ -108,8 +122,9 @@ function pluck(freq,velocity,pan){
   const now=actx.currentTime;
   const p=INSTRUMENTS[instrumentIndex];
   const gain=actx.createGain();
+  const lvl=Math.min(velocity*(p.level||1),1);
   gain.gain.setValueAtTime(0,now);
-  gain.gain.linearRampToValueAtTime(Math.min(velocity,1),now+p.attack);
+  gain.gain.linearRampToValueAtTime(lvl,now+p.attack);
   gain.gain.exponentialRampToValueAtTime(0.0015,now+p.attack+p.decay);
   let out=gain;
   if(p.filter){
@@ -216,8 +231,7 @@ function drawHints(){
 
 // ---- touch / pointer handling ----
 const pointers=new Map();
-let longPressTimer=null;
-const LONG_PRESS_MS=500, SLOP=14;
+const LONG_PRESS_MS=700, SLOP=14;
 function inStop(x){ return x>=stopLeft; }
 function inStringZone(x){ return x>=w2 && !inStop(x); }
 function chordIndexAt(x,y){
@@ -229,14 +243,23 @@ function posMultiplier(x){
   const t=Math.max(0,Math.min(1,(x-w2)/(stopLeft-w2)));
   return 1-t*0.7;
 }
+function cancelLongPress(p){
+  if(p.timer){ clearTimeout(p.timer); p.timer=null; }
+}
 canvas.addEventListener('pointerdown',e=>{
   showHints=false;
   canvas.setPointerCapture(e.pointerId);
   const p={x:e.clientX,y:e.clientY,downX:e.clientX,downY:e.clientY,
-    oldString:-1,oldY:0,oldClock:0,lastPlucked:-1,longPressFired:false};
+    oldString:-1,oldY:0,oldClock:0,lastPlucked:-1,longPressFired:false,timer:null};
   pointers.set(e.pointerId,p);
-  if(inStringZone(p.x,p.y)){
-    longPressTimer=setTimeout(()=>{ p.longPressFired=true; openInstrumentMenu(); },LONG_PRESS_MS);
+  // Long-press only counts as "open the menu" when it's the only finger on
+  // screen - a second finger joining (e.g. strumming while another finger
+  // holds a sustained note) cancels any pending timer immediately, so
+  // multitouch play never accidentally triggers the instrument menu.
+  if(pointers.size>1){
+    for(const op of pointers.values()) cancelLongPress(op);
+  }else if(inStringZone(p.x,p.y)){
+    p.timer=setTimeout(()=>{ p.longPressFired=true; p.timer=null; openInstrumentMenu(); },LONG_PRESS_MS);
   }
   maybeEditChord();
   handleTouch();
@@ -245,12 +268,12 @@ canvas.addEventListener('pointermove',e=>{
   const p=pointers.get(e.pointerId); if(!p) return;
   p.x=e.clientX; p.y=e.clientY;
   const dx=p.x-p.downX, dy=p.y-p.downY;
-  if(dx*dx+dy*dy>SLOP*SLOP && longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; }
+  if(dx*dx+dy*dy>SLOP*SLOP) cancelLongPress(p);
   handleTouch();
 });
 function release(id){
   const p=pointers.get(id); if(!p) return;
-  if(longPressTimer){ clearTimeout(longPressTimer); longPressTimer=null; }
+  cancelLongPress(p);
   if(p.lastPlucked>=0){
     let held=false;
     for(const [oid,op] of pointers) if(oid!==id && op.oldString===p.lastPlucked) held=true;
@@ -338,6 +361,19 @@ function openInstrumentMenu(){
     try{ localStorage.setItem('fh_instrument',instrumentIndex); }catch(e){}
   });
 }
+
+const fsBtn=document.getElementById('fsBtn');
+fsBtn.addEventListener('click',()=>{
+  if(!document.fullscreenElement){
+    (document.documentElement.requestFullscreen||document.documentElement.webkitRequestFullscreen)
+      .call(document.documentElement).catch(()=>{});
+  }else{
+    (document.exitFullscreen||document.webkitExitFullscreen).call(document);
+  }
+});
+document.addEventListener('fullscreenchange',()=>{
+  fsBtn.textContent=document.fullscreenElement?'✕':'⛶';
+});
 
 resize(); rebuildDampers(); draw();
 </script>
